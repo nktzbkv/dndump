@@ -1,5 +1,11 @@
 #import <AppKit/AppKit.h>
 
+enum {
+  Flag_Post = 1 << 0,
+  Flag_Wait = 1 << 1,
+  Flag_JSONObject = 1 << 2
+};
+
 void fail(const char* format, ...) {
   va_list va;
   va_start(va, format);
@@ -7,14 +13,17 @@ void fail(const char* format, ...) {
   exit(-1);
 }
 
-void writeObject(id object) {
-  printf("%s\n", [[object description] cStringUsingEncoding: NSUTF8StringEncoding]);
+const char* objectToCString(id object) {
+  return [[object description] cStringUsingEncoding: NSUTF8StringEncoding];
 }
 
-enum {
-  Flag_Post = 1 << 0,
-  Flag_Wait = 1 << 1,
-};
+void writeObject(id data, id object) {
+  if (object) {
+    printf("[%s] %s\n", objectToCString(object), objectToCString(data));
+  } else {
+    printf("%s\n", objectToCString(data));
+  }
+}
 
 int parseFlags(int* flags, int argc, const char** argv) {
   for (int i = 1; i < argc; ++i) {
@@ -24,6 +33,7 @@ int parseFlags(int* flags, int argc, const char** argv) {
       switch (arg[j]) {
         case 'p': *flags |= Flag_Post; break;
         case 'w': *flags |= Flag_Wait; break;
+        case 'j': *flags |= Flag_JSONObject; break;
         default: printf("%s: unknown option %c\n", argv[0], arg[j]);
       }
     }
@@ -44,6 +54,7 @@ int main(int argc, const char** argv) {
     }
 
     if (flags & Flag_Post) {
+      id object = nil;
       NSMutableDictionary* userInfo = nil;
       NSUInteger count = keys.count;
       if (count) {
@@ -55,15 +66,41 @@ int main(int argc, const char** argv) {
         }
       }
 
-      [NSDistributedNotificationCenter.defaultCenter postNotificationName: notificaitonName object: nil userInfo: userInfo];
+      if (flags & Flag_JSONObject) {
+        if (userInfo) {
+          id err = nil;
+          NSData* jsonData = [NSJSONSerialization dataWithJSONObject: userInfo options:0 error: &err];
+          if (err) fail("Error while encoding json: %s\n", objectToCString(err));
+          object = [NSString.alloc initWithData: jsonData encoding: NSUTF8StringEncoding];
+          userInfo = nil;
+        }
+      }
+
+      [NSDistributedNotificationCenter.defaultCenter postNotificationName: notificaitonName object: object userInfo: userInfo];
     } else {
       [NSDistributedNotificationCenter.defaultCenter addObserverForName: notificaitonName object: nil queue: NSOperationQueue.mainQueue usingBlock: ^(NSNotification* note) {
-        if (keys.count > 1) {
-          writeObject([note.userInfo dictionaryWithValuesForKeys: keys]);
+        id object = note.object;
+        id userInfo = note.userInfo;
+
+        if (flags & Flag_JSONObject) {
+          if (object) {
+            id err = nil;
+            userInfo = [NSJSONSerialization JSONObjectWithData: [object dataUsingEncoding: NSUTF8StringEncoding] options: 0 error: &err];
+            if (err) fail("Error while decoding json: %s\n", objectToCString(err));
+            object = nil;
+          } else {
+            userInfo = nil;
+          }
+        }
+
+        if (![userInfo isKindOfClass: NSDictionary.class]) {
+          writeObject(userInfo, object);
+        } else if (keys.count > 1) {
+          writeObject([userInfo dictionaryWithValuesForKeys: keys], object);
         } else if (keys.count == 1) {
-          writeObject([note.userInfo objectForKey: keys.firstObject]);
+          writeObject([userInfo objectForKey: keys.firstObject], object);
         } else {
-          writeObject(note.userInfo);
+          writeObject(userInfo, object);
         }
         if (flags & Flag_Wait) [NSApp terminate: nil];
       }];
