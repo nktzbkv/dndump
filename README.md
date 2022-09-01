@@ -4,10 +4,10 @@ Subscribes to the given distributed notification and dumps data from associated 
 
 Clone or download, then run `make`
 
-# Usage example
+# Listen To Notifications
 
 ```
-./dndump com.apple.iTunes.playerInfo "Player State" Artist Name
+dndump com.apple.iTunes.playerInfo "Player State" Artist Name
 {
     Artist = "Story of the Year";
     Name = "Praying for Rain";
@@ -23,4 +23,10 @@ Clone or download, then run `make`
     Name = Stay;
     "Player State" = Playing;
 }
+```
+
+# Post Notifications
+
+```
+dndump -p com.apple.iTunes.playerInfo "Player State" Playing
 ```

@@ -1,5 +1,6 @@
 test: dndump
-	./dndump com.apple.iTunes.playerInfo "Player State" Artist Name
+	(sleep 2; ./dndump -p yay Key1 Value1 Key2 Value2) &
+	./dndump -w yay
 
 dndump: dndump.m
 	clang "$<" -Ofast -framework AppKit -o "$@"
