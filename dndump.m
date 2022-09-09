@@ -41,10 +41,53 @@ int parseFlags(int* flags, int argc, const char** argv) {
   return argc;
 }
 
+@interface DNCReciever : NSObject
+@property int flags;
+@property (strong) NSArray* keys;
+@end
+
+@implementation DNCReciever
+
+- (void)runWithNotificaitonName:(NSString*)notificaitonName {
+  NSDistributedNotificationCenter* nc = NSDistributedNotificationCenter.defaultCenter;
+  [nc addObserver: self selector: @selector(handleNotification:) name: notificaitonName object: nil suspensionBehavior: NSNotificationSuspensionBehaviorDeliverImmediately];
+  [NSRunLoop.mainRunLoop run];
+  [nc removeObserver: self];
+}
+
+- (void)handleNotification:(NSNotification*)note {
+  id object = note.object;
+  id userInfo = note.userInfo;
+
+  if (_flags & Flag_JSONObject) {
+    if (object) {
+      id err = nil;
+      userInfo = [NSJSONSerialization JSONObjectWithData: [object dataUsingEncoding: NSUTF8StringEncoding] options: 0 error: &err];
+      if (err) fail("Error while decoding json: %s\n", objectToCString(err));
+      object = nil;
+    } else {
+      userInfo = nil;
+    }
+  }
+
+  if (![userInfo isKindOfClass: NSDictionary.class]) {
+    writeObject(userInfo, object);
+  } else if (_keys.count > 1) {
+    writeObject([userInfo dictionaryWithValuesForKeys: _keys], object);
+  } else if (_keys.count == 1) {
+    writeObject([userInfo objectForKey: _keys.firstObject], object);
+  } else {
+    writeObject(userInfo, object);
+  }
+  if (_flags & Flag_Wait) exit(0);
+}
+
+@end
+
 int main(int argc, const char** argv) {
   int flags = 0;
   int i = parseFlags(&flags, argc, argv);
-  if (i >= argc) fail("Usage: %s [-pw] <notificaitonName> [userInfoKeys...]\n", argv[0]);
+  if (i >= argc) fail("Usage: %s [-jpw] <notificaitonName> [userInfoKeys...]\n", argv[0]);
 
   @autoreleasepool {
     NSString* notificaitonName = [NSString stringWithUTF8String: argv[i++]];
@@ -76,35 +119,12 @@ int main(int argc, const char** argv) {
         }
       }
 
-      [NSDistributedNotificationCenter.defaultCenter postNotificationName: notificaitonName object: object userInfo: userInfo];
+      [NSDistributedNotificationCenter.defaultCenter postNotificationName: notificaitonName object: object userInfo: userInfo deliverImmediately: YES];
     } else {
-      [NSDistributedNotificationCenter.defaultCenter addObserverForName: notificaitonName object: nil queue: NSOperationQueue.mainQueue usingBlock: ^(NSNotification* note) {
-        id object = note.object;
-        id userInfo = note.userInfo;
-
-        if (flags & Flag_JSONObject) {
-          if (object) {
-            id err = nil;
-            userInfo = [NSJSONSerialization JSONObjectWithData: [object dataUsingEncoding: NSUTF8StringEncoding] options: 0 error: &err];
-            if (err) fail("Error while decoding json: %s\n", objectToCString(err));
-            object = nil;
-          } else {
-            userInfo = nil;
-          }
-        }
-
-        if (![userInfo isKindOfClass: NSDictionary.class]) {
-          writeObject(userInfo, object);
-        } else if (keys.count > 1) {
-          writeObject([userInfo dictionaryWithValuesForKeys: keys], object);
-        } else if (keys.count == 1) {
-          writeObject([userInfo objectForKey: keys.firstObject], object);
-        } else {
-          writeObject(userInfo, object);
-        }
-        if (flags & Flag_Wait) [NSApp terminate: nil];
-      }];
-      [[NSApplication sharedApplication] run];
+      DNCReciever* receiver = DNCReciever.new;
+      receiver.flags = flags;
+      receiver.keys = keys;
+      [receiver runWithNotificaitonName: notificaitonName];
     }
   }
 

@@ -8,4 +8,5 @@ dndump: dndump.m
 	clang "$<" -Ofast -framework AppKit -o "$@"
 
 install: dndump
+	sudo rm -f "/usr/local/bin/$<"
 	sudo cp "$<" "/usr/local/bin/$<"
