@@ -2,22 +2,32 @@
 
 enum {
   Flag_Post = 1 << 0,
-  Flag_Wait = 1 << 1,
-  Flag_JSONObject = 1 << 2
+  Flag_Listen = 1 << 1,
+  Flag_Wait = 1 << 2,
+  Flag_JSON = 1 << 3,
+  Flag_AllSessions = 1 << 4
 };
 
-void fail(const char* format, ...) {
+static int observerCount = 0;
+
+static void fail(const char* format, ...) {
   va_list va;
   va_start(va, format);
   vfprintf(stderr, format, va);
   exit(-1);
 }
 
-const char* objectToCString(id object) {
+static void warn(const char* format, ...) {
+  va_list va;
+  va_start(va, format);
+  vfprintf(stdout, format, va);
+}
+
+static const char* objectToCString(id object) {
   return [[object description] cStringUsingEncoding: NSUTF8StringEncoding];
 }
 
-void writeObject(id data, id object) {
+static void writeObject(id data, id object) {
   if (object) {
     printf("[%s] %s\n", objectToCString(object), objectToCString(data));
   } else {
@@ -25,108 +35,147 @@ void writeObject(id data, id object) {
   }
 }
 
-int parseFlags(int* flags, int argc, const char** argv) {
-  for (int i = 1; i < argc; ++i) {
-    const char* arg = argv[i];
-    if (arg[0] != '-') return i;
-    for (int j = 1; arg[j]; ++j) {
-      switch (arg[j]) {
-        case 'p': *flags |= Flag_Post; break;
-        case 'w': *flags |= Flag_Wait; break;
-        case 'j': *flags |= Flag_JSONObject; break;
-        default: printf("%s: unknown option %c\n", argv[0], arg[j]);
+typedef void (^ObserverBlock)(id,id);
+
+static void handleNotification(CFNotificationCenterRef center, void *observer, CFNotificationName name, const void *object, CFDictionaryRef userInfo) {
+  // NSLog(@"%@: %@[%@]", name, object, userInfo);
+  ObserverBlock block = (__bridge ObserverBlock)observer;
+  if (block) block((__bridge id)object, (__bridge id)userInfo);
+}
+
+static void execute(const char* bin, int flags, int savedFlags, NSString* notificationName, NSMutableArray* params) {
+  // NSLog(@"%i: %@ [%@]", flags, notificationName, params);
+
+  CFNotificationCenterRef center = CFNotificationCenterGetDistributedCenter();
+
+  int fullFlags = flags | savedFlags;
+
+  if (flags & Flag_Post) {
+    CFOptionFlags options = kCFNotificationDeliverImmediately;
+    if (fullFlags & Flag_AllSessions) options |= kCFNotificationPostToAllSessions;
+
+    id object = nil;
+    NSMutableDictionary* userInfo = nil;
+    NSUInteger count = params.count;
+    if (count) {
+      if (count % 2) { fail("%s: expecting even number of params\n", bin); count -= 1; }
+
+      userInfo = [NSMutableDictionary dictionaryWithCapacity: count/2];
+      for (NSUInteger k = 0; k < count; k += 2) {
+        userInfo[params[k]] = params[k + 1];
       }
     }
-  }
-  return argc;
-}
 
-@interface DNCReciever : NSObject
-@property int flags;
-@property (strong) NSArray* keys;
-@end
-
-@implementation DNCReciever
-
-- (void)runWithNotificaitonName:(NSString*)notificaitonName {
-  NSDistributedNotificationCenter* nc = NSDistributedNotificationCenter.defaultCenter;
-  [nc addObserver: self selector: @selector(handleNotification:) name: notificaitonName object: nil suspensionBehavior: NSNotificationSuspensionBehaviorDeliverImmediately];
-  [NSRunLoop.mainRunLoop run];
-  [nc removeObserver: self];
-}
-
-- (void)handleNotification:(NSNotification*)note {
-  id object = note.object;
-  id userInfo = note.userInfo;
-
-  if (_flags & Flag_JSONObject) {
-    if (object) {
-      id err = nil;
-      userInfo = [NSJSONSerialization JSONObjectWithData: [object dataUsingEncoding: NSUTF8StringEncoding] options: 0 error: &err];
-      if (err) fail("Error while decoding json: %s\n", objectToCString(err));
-      object = nil;
-    } else {
-      userInfo = nil;
+    if (fullFlags & Flag_JSON) {
+      if (userInfo) {
+        id err = nil;
+        NSData* jsonData = [NSJSONSerialization dataWithJSONObject: userInfo options:0 error: &err];
+        if (err) fail("%s: error while encoding json: %s\n", bin, objectToCString(err));
+        object = [NSString.alloc initWithData: jsonData encoding: NSUTF8StringEncoding];
+        userInfo = nil;
+      }
     }
-  }
 
-  if (![userInfo isKindOfClass: NSDictionary.class]) {
-    writeObject(userInfo, object);
-  } else if (_keys.count > 1) {
-    writeObject([userInfo dictionaryWithValuesForKeys: _keys], object);
-  } else if (_keys.count == 1) {
-    writeObject([userInfo objectForKey: _keys.firstObject], object);
+    CFNotificationCenterPostNotificationWithOptions(center,
+      (__bridge CFStringRef)notificationName,
+      (__bridge void*)object, (__bridge CFDictionaryRef)userInfo, options);
   } else {
-    writeObject(userInfo, object);
-  }
-  if (_flags & Flag_Wait) exit(0);
-}
-
-@end
-
-int main(int argc, const char** argv) {
-  int flags = 0;
-  int i = parseFlags(&flags, argc, argv);
-  if (i >= argc) fail("Usage: %s [-jpw] <notificaitonName> [userInfoKeys...]\n", argv[0]);
-
-  @autoreleasepool {
-    NSString* notificaitonName = [NSString stringWithUTF8String: argv[i++]];
-    NSMutableArray* keys = NSMutableArray.array;
-    for (; i < argc; ++i) {
-      [keys addObject: [NSString stringWithUTF8String: argv[i]]];
-    }
-
-    if (flags & Flag_Post) {
-      id object = nil;
-      NSMutableDictionary* userInfo = nil;
-      NSUInteger count = keys.count;
-      if (count) {
-        if (count % 2) { fail("Expecting even number of keys\n"); count -= 1; }
-
-        userInfo = [NSMutableDictionary dictionaryWithCapacity: count/2];
-        for (NSUInteger k = 0; k < count; k += 2) {
-          userInfo[keys[k]] = keys[k + 1];
-        }
-      }
-
-      if (flags & Flag_JSONObject) {
-        if (userInfo) {
+    ObserverBlock observer = ^(id object, id userInfo) {
+      if (fullFlags & Flag_JSON) {
+        if (object) {
           id err = nil;
-          NSData* jsonData = [NSJSONSerialization dataWithJSONObject: userInfo options:0 error: &err];
-          if (err) fail("Error while encoding json: %s\n", objectToCString(err));
-          object = [NSString.alloc initWithData: jsonData encoding: NSUTF8StringEncoding];
+          @try {
+            userInfo = [NSJSONSerialization JSONObjectWithData: [object dataUsingEncoding: NSUTF8StringEncoding] options: 0 error: &err];
+            object = nil;
+          } @catch (id e) {
+            err = e;
+          }
+          if (err) warn("%s: error while decoding json: %s\n", bin, objectToCString(err));
+        } else {
           userInfo = nil;
         }
       }
 
-      [NSDistributedNotificationCenter.defaultCenter postNotificationName: notificaitonName object: object userInfo: userInfo deliverImmediately: YES];
-    } else {
-      DNCReciever* receiver = DNCReciever.new;
-      receiver.flags = flags;
-      receiver.keys = keys;
-      [receiver runWithNotificaitonName: notificaitonName];
-    }
-  }
+      if (![userInfo isKindOfClass: NSDictionary.class]) {
+        writeObject(userInfo, object);
+      } else if (params.count > 1) {
+        writeObject([userInfo dictionaryWithValuesForKeys: params], object);
+      } else if (params.count == 1) {
+        writeObject([userInfo objectForKey: params.firstObject], object);
+      } else {
+        writeObject(userInfo, object);
+      }
 
-  return 0;
+      if (fullFlags & Flag_Wait) exit(0);
+    };
+
+    CFNotificationCenterAddObserver(center, CFBridgingRetain([observer copy]),
+      handleNotification,
+      (__bridge CFStringRef)notificationName, nil, CFNotificationSuspensionBehaviorDeliverImmediately);
+
+    observerCount += 1;
+  }
+}
+
+int main(int argc, const char** argv) {
+  @autoreleasepool {
+    if (argc < 2) fail("Usage: %s [-jplwa] <notificaitonName> [parameters...]\n", argv[0]);
+
+    int i = 1;
+    int savedFlags = 0;
+    int flags = 0;
+    NSString* notificationName = nil;
+
+    while (i < argc) {
+      const char* arg = argv[i];
+      if (arg[0] != '-') break;
+      i += 1;
+      if (!arg[1]) break;
+
+      if (notificationName) execute(argv[0], flags, savedFlags, notificationName, nil);
+
+      flags = 0;
+      notificationName = nil;
+
+      for (int j = 1; arg[j]; ++j) {
+        switch (arg[j]) {
+          case 'p': flags |= Flag_Post; break;
+          case 'l': flags |= Flag_Listen; break;
+          case 'w': flags |= Flag_Wait; break;
+          case 'j': flags |= Flag_JSON; break;
+          case 'a': flags |= Flag_AllSessions; break;
+          default: fail("%s: unknown option %c\n", argv[0], arg[j]);
+        }
+      }
+
+      if ((flags & Flag_Post) && (flags & (Flag_Listen|Flag_Wait))) {
+        fail("%s: -p cannot be combined with -l or -w", argv[0]);
+      }
+      if ((flags & Flag_AllSessions) && (flags & (Flag_Listen|Flag_Wait))) {
+        fail("%s: -a cannot be combined with -l or -w", argv[0]);
+      }
+
+      if (flags & (Flag_Post|Flag_Listen|Flag_Wait)) {
+        if (i >= argc) fail("%s: expecting notification name after %s\n", argv[0], arg);
+        notificationName = [NSString stringWithUTF8String: argv[i++]];
+      } else {
+        savedFlags |= flags;
+      }
+    }
+
+    NSMutableArray* params = nil;
+    if (i < argc) {
+      params = [NSMutableArray.alloc initWithCapacity: argc - i];
+      do { [params addObject: [NSString stringWithUTF8String: argv[i]]]; } while (++i < argc);
+
+      if (!notificationName) {
+        notificationName = params.firstObject;
+        [params removeObjectAtIndex: 0];
+      }
+    }
+
+    if (notificationName) execute(argv[0], flags, savedFlags, notificationName, params);
+    if (observerCount) CFRunLoopRun();
+    return 0;
+  }
 }
